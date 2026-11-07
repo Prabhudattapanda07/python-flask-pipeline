@@ -2,7 +2,7 @@ pipeline {
 agent any
 
 environment {
-    IMAGE_NAME = "pandu867/bubu-flaskapp"
+    IMAGE_NAME = "prabhudatta07/python-flask"
     IMAGE_TAG = "${BUILD_NUMBER}"
 }
 
