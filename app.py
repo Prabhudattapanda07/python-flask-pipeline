@@ -1,452 +1,1219 @@
+
 import os
 import sqlite3
 import secrets
-from functools import wraps
 from datetime import datetime
-from flask import Flask, request, redirect, url_for, session, flash, render_template_string, abort
+from functools import wraps
+from contextlib import contextmanager
+
+from flask import (
+    Flask, request, redirect, url_for,
+    session, flash, render_template_string, abort
+)
 from werkzeug.security import generate_password_hash, check_password_hash
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(APP_DIR, "shop.db"))
-
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-before-production")
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+app.secret_key = os.environ.get(
+    "SECRET_KEY", "tastybite-demo-secret-change-in-production"
+)
+
+DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "food.db")
 
 
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+# =========================
+# DATABASE CONNECTION
+# =========================
+
+@contextmanager
+def get_db():
+    con = sqlite3.connect(DATABASE)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
-def init_db():
-    with db() as con:
+def initialize_database():
+    with get_db() as con:
+
         con.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            is_admin INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            password TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS products (
+
+        CREATE TABLE IF NOT EXISTS foods (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             description TEXT NOT NULL,
-            price REAL NOT NULL CHECK(price >= 0),
-            stock INTEGER NOT NULL DEFAULT 0 CHECK(stock >= 0),
             category TEXT NOT NULL,
-            image_url TEXT NOT NULL DEFAULT ''
+            price REAL NOT NULL,
+            image TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS cart_items (
+
+        CREATE TABLE IF NOT EXISTS cart (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-            quantity INTEGER NOT NULL CHECK(quantity > 0),
-            UNIQUE(user_id, product_id)
+            user_id INTEGER NOT NULL,
+            food_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            UNIQUE(user_id, food_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(food_id) REFERENCES foods(id)
         );
+
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
+            user_id INTEGER NOT NULL,
+            customer_name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            address TEXT NOT NULL,
             total REAL NOT NULL,
-            status TEXT NOT NULL DEFAULT 'Placed',
-            created_at TEXT NOT NULL
+            status TEXT DEFAULT 'Order Received',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
         );
+
         CREATE TABLE IF NOT EXISTS order_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-            product_id INTEGER NOT NULL REFERENCES products(id),
-            product_name TEXT NOT NULL,
+            order_id INTEGER NOT NULL,
+            food_name TEXT NOT NULL,
             price REAL NOT NULL,
-            quantity INTEGER NOT NULL
+            quantity INTEGER NOT NULL,
+            FOREIGN KEY(order_id) REFERENCES orders(id)
         );
         """)
-        count = con.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-        if count == 0:
-            products = [
-                ("Wireless Headphones", "Comfortable over-ear headphones with clear sound.", 1499, 25, "Electronics", "https://images.unsplash.com/photo-1505740420928-5e560c06d30e"),
-                ("Smart Watch", "Fitness tracking, notifications and everyday style.", 2299, 18, "Electronics", "https://images.unsplash.com/photo-1523275335684-37898b6baf30"),
-                ("Running Shoes", "Lightweight everyday running shoes.", 1899, 30, "Fashion", "https://images.unsplash.com/photo-1542291026-7eec264c27ff"),
-                ("Backpack", "Durable backpack for college, work and travel.", 999, 22, "Accessories", "https://images.unsplash.com/photo-1553062407-98eeb64c6a62"),
-                ("Coffee Mug", "Ceramic mug for your daily coffee or tea.", 299, 40, "Home", "https://images.unsplash.com/photo-1514228742587-6b1558fcca3d"),
-                ("Bluetooth Speaker", "Portable speaker with rich audio.", 1199, 15, "Electronics", "https://images.unsplash.com/photo-1608043152269-423dbba4e7e1"),
+
+        if con.execute("SELECT COUNT(*) FROM foods").fetchone()[0] == 0:
+
+            foods = [
+                ("Cheese Burger", "Delicious burger with cheese and fresh vegetables.", "Burger", 149,
+                 "https://images.unsplash.com/photo-1568901346375-23c9450c58cd"),
+
+                ("Veg Pizza", "Freshly baked pizza loaded with vegetables.", "Pizza", 249,
+                 "https://images.unsplash.com/photo-1513104890138-7c749659a591"),
+
+                ("Chicken Pizza", "Pizza topped with chicken and mozzarella.", "Pizza", 329,
+                 "https://images.unsplash.com/photo-1571407970349-bc81e7e96d47"),
+
+                ("White Sauce Pasta", "Creamy pasta with herbs and vegetables.", "Pasta", 199,
+                 "https://images.unsplash.com/photo-1473093295043-cdd812d0e601"),
+
+                ("French Fries", "Crispy golden potato fries.", "Snacks", 99,
+                 "https://images.unsplash.com/photo-1573080496219-bb080dd4f877"),
+
+                ("Chocolate Cake", "Rich chocolate dessert.", "Dessert", 129,
+                 "https://images.unsplash.com/photo-1578985545062-69928b1d9587"),
+
+                ("Cold Coffee", "Refreshing chilled coffee.", "Drinks", 89,
+                 "https://images.unsplash.com/photo-1461023058943-07fcbe16d735"),
+
+                ("Sandwich", "Fresh sandwich with vegetables and cheese.", "Snacks", 119,
+                 "https://images.unsplash.com/photo-1528735602780-2552fd46c7af")
             ]
-            con.executemany(
-                "INSERT INTO products(name, description, price, stock, category, image_url) VALUES(?,?,?,?,?,?)",
-                products
-            )
+
+            con.executemany("""
+                INSERT INTO foods
+                (name, description, category, price, image)
+                VALUES (?, ?, ?, ?, ?)
+            """, foods)
+
+
+initialize_database()
+
+
+# =========================
+# AUTHENTICATION
+# =========================
+
+def get_user():
+    user_id = session.get("user_id")
+
+    if not user_id:
+        return None
+
+    with get_db() as con:
+        return con.execute(
+            "SELECT id, name, email FROM users WHERE id=?",
+            (user_id,)
+        ).fetchone()
+
+
+def login_required(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+
+        if not get_user():
+            flash("Please login first.", "warning")
+            return redirect(url_for("login"))
+
+        return function(*args, **kwargs)
+
+    return wrapper
 
 
 def csrf_token():
     if "_csrf" not in session:
         session["_csrf"] = secrets.token_urlsafe(24)
+
     return session["_csrf"]
 
 
 def verify_csrf():
     token = request.form.get("_csrf", "")
+
     if not token or token != session.get("_csrf"):
-        abort(400, "Invalid form token. Refresh the page and try again.")
+        abort(400, "Invalid form token. Refresh and try again.")
 
 
 @app.context_processor
-def inject_globals():
-    return {"csrf": csrf_token, "current_user": get_current_user()}
+def inject_user():
+    return {
+        "user": get_user(),
+        "csrf": csrf_token
+    }
 
 
-def get_current_user():
-    user_id = session.get("user_id")
-    if not user_id:
-        return None
-    with db() as con:
-        return con.execute("SELECT id, name, email, is_admin FROM users WHERE id=?", (user_id,)).fetchone()
+# =========================
+# HTML DESIGN
+# =========================
 
+LAYOUT = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }} | TastyBite</title>
 
-def login_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if not get_current_user():
-            flash("Please log in to continue.", "warning")
-            return redirect(url_for("login"))
-        return fn(*args, **kwargs)
-    return wrapper
+    <meta name="viewport" content="width=device-width, initial-scale=1">
 
+    <style>
+        * {
+            box-sizing: border-box;
+        }
 
-def admin_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        user = get_current_user()
-        if not user or not user["is_admin"]:
-            abort(403)
-        return fn(*args, **kwargs)
-    return wrapper
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f7f7f7;
+            color: #222;
+        }
 
+        nav {
+            background: white;
+            padding: 16px 6%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            box-shadow: 0 2px 10px #00000010;
+        }
 
-BASE = """
-<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }} · ShopEase</title>
-<style>
-:root{--ink:#172033;--muted:#667085;--brand:#5b55e7;--bg:#f5f6fb;--line:#e7e9f0}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Arial,sans-serif}
-nav{background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-.navin{max-width:1120px;margin:auto;padding:14px 20px;display:flex;align-items:center;gap:22px}
-.logo{font-size:21px;font-weight:800;color:var(--brand);text-decoration:none;margin-right:auto}
-nav a{color:var(--ink);text-decoration:none;font-weight:600}.navin form{margin:0}
-.wrap{max-width:1120px;margin:28px auto;padding:0 20px}
-.hero{background:linear-gradient(120deg,#24215f,#716af2);color:#fff;padding:38px;border-radius:20px;margin-bottom:28px}
-.hero h1{font-size:34px;margin:0 0 8px}.hero p{margin:0;color:#e5e4ff}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
-.card{background:#fff;border:1px solid var(--line);border-radius:15px;overflow:hidden}
-.card img{width:100%;height:170px;object-fit:cover;background:#eceef5}
-.pad{padding:16px}.muted{color:var(--muted)}.price{font-size:20px;font-weight:800;margin:8px 0}
-.btn{border:0;border-radius:9px;background:var(--brand);color:#fff;padding:10px 15px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}
-.btn.secondary{background:#ecebff;color:#3932b8}.btn.danger{background:#d92d20}
-input,textarea,select{width:100%;padding:11px;border:1px solid #d8dce6;border-radius:8px;margin:6px 0 14px;font:inherit}
-label{font-weight:700}form.inline{display:inline} .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-.panel{background:#fff;border:1px solid var(--line);border-radius:15px;padding:22px;margin-bottom:18px}
-table{width:100%;border-collapse:collapse;background:#fff}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line)}
-.notice{padding:12px 15px;border-radius:9px;background:#eaf7ef;margin-bottom:12px}.notice.warning{background:#fff4df}
-.auth{max-width:440px;margin:50px auto}.empty{text-align:center;padding:45px;background:#fff;border-radius:15px}
-footer{text-align:center;color:var(--muted);padding:30px}
-@media(max-width:650px){.navin{gap:12px;flex-wrap:wrap}.hero{padding:25px}.hero h1{font-size:27px}table{font-size:13px}th,td{padding:8px}}
-</style></head><body>
-<nav><div class="navin"><a class="logo" href="{{ url_for('home') }}">ShopEase</a>
-<a href="{{ url_for('home') }}">Shop</a>
-{% if current_user %}<a href="{{ url_for('cart') }}">Cart</a><a href="{{ url_for('orders') }}">Orders</a>
-{% if current_user['is_admin'] %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
-<span class="muted">Hi, {{ current_user['name'] }}</span>
-<form class="inline" method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ csrf() }}"><button class="btn secondary" type="submit">Logout</button></form>
-{% else %}<a href="{{ url_for('login') }}">Login</a><a class="btn" href="{{ url_for('register') }}">Sign up</a>{% endif %}
-</div></nav>
-<main class="wrap">
-{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}
-<div class="notice {{ 'warning' if category=='warning' else '' }}">{{ message }}</div>{% endfor %}{% endwith %}
-{{ content|safe }}
-</main><footer>ShopEase · Demo online shopping application</footer></body></html>
+        .logo {
+            font-size: 25px;
+            font-weight: bold;
+            color: #ed5b2b;
+            text-decoration: none;
+        }
+
+        nav a {
+            text-decoration: none;
+            color: #333;
+            font-weight: bold;
+            margin: 0 8px;
+        }
+
+        .container {
+            max-width: 1150px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+
+        .hero {
+            background: linear-gradient(120deg, #30211b, #e65d32);
+            color: white;
+            padding: 55px 35px;
+            border-radius: 18px;
+            margin-bottom: 30px;
+        }
+
+        .hero h1 {
+            font-size: 38px;
+            margin: 0 0 12px;
+        }
+
+        .hero p {
+            font-size: 17px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 22px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 14px;
+            overflow: hidden;
+            box-shadow: 0 3px 12px #0000000c;
+        }
+
+        .card img {
+            width: 100%;
+            height: 180px;
+            object-fit: cover;
+        }
+
+        .card-content {
+            padding: 16px;
+        }
+
+        .card h3 {
+            margin: 8px 0;
+        }
+
+        .category {
+            color: #ed5b2b;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .price {
+            font-size: 21px;
+            font-weight: bold;
+            margin: 12px 0;
+        }
+
+        .btn {
+            display: inline-block;
+            background: #ed5b2b;
+            color: white;
+            padding: 11px 17px;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        .btn:hover {
+            background: #ca431b;
+        }
+
+        .secondary {
+            background: #333;
+        }
+
+        input, textarea, select {
+            width: 100%;
+            padding: 12px;
+            margin: 7px 0 16px;
+            border: 1px solid #ddd;
+            border-radius: 7px;
+            font-size: 15px;
+        }
+
+        label {
+            font-weight: bold;
+        }
+
+        .panel {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+
+        .auth {
+            max-width: 430px;
+            margin: 45px auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+
+        th, td {
+            padding: 13px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        .message {
+            background: #e3f8e9;
+            padding: 12px;
+            border-radius: 7px;
+            margin-bottom: 12px;
+        }
+
+        .warning {
+            background: #fff0df;
+        }
+
+        .muted {
+            color: #777;
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: #777;
+        }
+
+        @media(max-width: 600px) {
+            .hero h1 {
+                font-size: 28px;
+            }
+
+            nav {
+                justify-content: center;
+            }
+
+            th, td {
+                padding: 8px;
+                font-size: 13px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<nav>
+    <a class="logo" href="/">TastyBite 🍔</a>
+
+    <div>
+        <a href="/">Home</a>
+
+        {% if user %}
+            <a href="/cart">Cart</a>
+            <a href="/orders">My Orders</a>
+
+            <form action="/logout" method="POST" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf() }}">
+                <button class="btn secondary">Logout</button>
+            </form>
+        {% else %}
+            <a href="/login">Login</a>
+            <a href="/register">Register</a>
+        {% endif %}
+    </div>
+</nav>
+
+<div class="container">
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+            <div class="message {{ 'warning' if category == 'warning' else '' }}">
+                {{ message }}
+            </div>
+        {% endfor %}
+    {% endwith %}
+
+    {{ content|safe }}
+
+</div>
+
+<footer>
+    TastyBite Food Ordering System | Fresh Food, Fast Delivery
+</footer>
+
+</body>
+</html>
 """
 
 
-def page(title, body, **context):
-    content = render_template_string(body, **context)
-    return render_template_string(BASE, title=title, content=content)
+def render_page(title, template, **context):
+    content = render_template_string(template, **context)
 
+    return render_template_string(
+        LAYOUT,
+        title=title,
+        content=content
+    )
+
+
+# =========================
+# HOME / FOOD MENU
+# =========================
 
 @app.route("/")
 def home():
+
     search = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
-    sql = "SELECT * FROM products WHERE 1=1"
-    args = []
-    if search:
-        sql += " AND (name LIKE ? OR description LIKE ?)"
-        args += [f"%{search}%", f"%{search}%"]
-    if category:
-        sql += " AND category=?"
-        args.append(category)
-    sql += " ORDER BY id DESC"
-    with db() as con:
-        products = con.execute(sql, args).fetchall()
-        categories = con.execute("SELECT DISTINCT category FROM products ORDER BY category").fetchall()
-    body = """
-    <section class="hero"><h1>Find your everyday favourites.</h1><p>Browse products, add them to your cart and place a demo order.</p></section>
-    <form method="get" class="panel"><div class="row">
-      <div style="flex:2;min-width:180px"><input name="q" placeholder="Search products..." value="{{ search }}"></div>
-      <div style="flex:1;min-width:150px"><select name="category"><option value="">All categories</option>{% for c in categories %}<option value="{{ c['category'] }}" {% if category==c['category'] %}selected{% endif %}>{{ c['category'] }}</option>{% endfor %}</select></div>
-      <button class="btn" type="submit">Search</button></div></form>
-    <div class="grid">{% for p in products %}<article class="card">
-      {% if p['image_url'] %}<img src="{{ p['image_url'] }}" alt="{{ p['name'] }}">{% endif %}
-      <div class="pad"><div class="muted">{{ p['category'] }} · {{ p['stock'] }} in stock</div><h3>{{ p['name'] }}</h3>
-      <p class="muted">{{ p['description'] }}</p><div class="price">₹{{ '%.2f'|format(p['price']) }}</div>
-      {% if p['stock']>0 %}<form method="post" action="{{ url_for('add_to_cart', product_id=p['id']) }}"><input type="hidden" name="_csrf" value="{{ csrf() }}"><button class="btn">Add to cart</button></form>{% else %}<span class="muted">Out of stock</span>{% endif %}
-      </div></article>{% else %}<div class="empty">No products found.</div>{% endfor %}</div>
-    """
-    return page("Shop", body, products=products, categories=categories, search=search, category=category)
 
+    with get_db() as con:
+
+        query = "SELECT * FROM foods WHERE 1=1"
+        params = []
+
+        if search:
+            query += " AND name LIKE ?"
+            params.append("%" + search + "%")
+
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+
+        query += " ORDER BY id"
+
+        foods = con.execute(query, params).fetchall()
+
+        categories = con.execute(
+            "SELECT DISTINCT category FROM foods ORDER BY category"
+        ).fetchall()
+
+    template = """
+    <section class="hero">
+        <h1>Delicious Food Delivered To You!</h1>
+        <p>Discover your favourite dishes and order them online.</p>
+        <a href="#menu" class="btn">Explore Menu</a>
+    </section>
+
+    <div class="panel">
+        <form method="GET">
+            <input
+                name="q"
+                placeholder="Search your favourite food..."
+                value="{{ search }}"
+            >
+
+            <select name="category">
+                <option value="">All Categories</option>
+
+                {% for c in categories %}
+                    <option value="{{ c['category'] }}"
+                    {% if category == c['category'] %}selected{% endif %}>
+                        {{ c['category'] }}
+                    </option>
+                {% endfor %}
+            </select>
+
+            <button class="btn">Search Food</button>
+        </form>
+    </div>
+
+    <h2 id="menu">Our Food Menu</h2>
+
+    <div class="grid">
+
+        {% for food in foods %}
+
+        <div class="card">
+
+            <img src="{{ food['image'] }}" alt="{{ food['name'] }}">
+
+            <div class="card-content">
+
+                <div class="category">{{ food['category'] }}</div>
+
+                <h3>{{ food['name'] }}</h3>
+
+                <p class="muted">{{ food['description'] }}</p>
+
+                <div class="price">₹{{ food['price'] }}</div>
+
+                <form method="POST"
+                    action="{{ url_for('add_to_cart', food_id=food['id']) }}">
+
+                    <input type="hidden" name="_csrf" value="{{ csrf() }}">
+                    <input type="hidden" name="quantity" value="1">
+
+                    <button class="btn">Add To Cart +</button>
+
+                </form>
+
+            </div>
+        </div>
+
+        {% else %}
+
+        <p>No food items found.</p>
+
+        {% endfor %}
+
+    </div>
+    """
+
+    return render_page(
+        "Home",
+        template,
+        foods=foods,
+        categories=categories,
+        search=search,
+        category=category
+    )
+
+
+# =========================
+# REGISTER
+# =========================
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
+
     if request.method == "POST":
+
         verify_csrf()
+
         name = request.form.get("name", "").strip()
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
-        if not name or not email or len(password) < 8:
-            flash("Enter your name, a valid email and a password of at least 8 characters.", "warning")
-        else:
-            try:
-                with db() as con:
-                    con.execute("INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)",
-                                (name, email, generate_password_hash(password), datetime.now().isoformat(timespec="seconds")))
-                flash("Account created. Please log in.")
-                return redirect(url_for("login"))
-            except sqlite3.IntegrityError:
-                flash("That email is already registered.", "warning")
-    body = """<div class="auth panel"><h2>Create your account</h2><form method="post">
-    <input type="hidden" name="_csrf" value="{{ csrf() }}"><label>Name</label><input name="name" required>
-    <label>Email</label><input type="email" name="email" required><label>Password (minimum 8 characters)</label><input type="password" name="password" minlength="8" required>
-    <button class="btn">Create account</button></form><p class="muted">Already registered? <a href="{{ url_for('login') }}">Log in</a></p></div>"""
-    return page("Register", body)
 
+        if not name or not email or len(password) < 8:
+            flash("Enter valid details. Password must be at least 8 characters.", "warning")
+
+        else:
+
+            try:
+                with get_db() as con:
+                    con.execute("""
+                        INSERT INTO users(name, email, password)
+                        VALUES (?, ?, ?)
+                    """, (
+                        name,
+                        email,
+                        generate_password_hash(password)
+                    ))
+
+                flash("Registration successful. Please login.")
+                return redirect(url_for("login"))
+
+            except sqlite3.IntegrityError:
+                flash("Email already registered.", "warning")
+
+    template = """
+    <div class="panel auth">
+
+        <h2>Create Account</h2>
+
+        <form method="POST">
+
+            <input type="hidden" name="_csrf" value="{{ csrf() }}">
+
+            <label>Full Name</label>
+            <input name="name" required>
+
+            <label>Email</label>
+            <input type="email" name="email" required>
+
+            <label>Password (minimum 8 characters)</label>
+            <input type="password" name="password" minlength="8" required>
+
+            <button class="btn">Register</button>
+
+        </form>
+
+        <p>Already registered? <a href="/login">Login</a></p>
+
+    </div>
+    """
+
+    return render_page("Register", template)
+
+
+# =========================
+# LOGIN
+# =========================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+
     if request.method == "POST":
+
         verify_csrf()
+
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
-        with db() as con:
-            user = con.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        if user and check_password_hash(user["password_hash"], password):
+
+        with get_db() as con:
+
+            user = con.execute(
+                "SELECT * FROM users WHERE email=?",
+                (email,)
+            ).fetchone()
+
+        if user and check_password_hash(user["password"], password):
+
             session.clear()
             session["user_id"] = user["id"]
-            flash("Welcome back!")
+
+            flash("Login successful!")
+
             return redirect(url_for("home"))
-        flash("Incorrect email or password.", "warning")
-    body = """<div class="auth panel"><h2>Welcome back</h2><form method="post">
-    <input type="hidden" name="_csrf" value="{{ csrf() }}"><label>Email</label><input type="email" name="email" required>
-    <label>Password</label><input type="password" name="password" required><button class="btn">Log in</button></form>
-    <p class="muted">New here? <a href="{{ url_for('register') }}">Create an account</a></p></div>"""
-    return page("Login", body)
+
+        flash("Invalid email or password.", "warning")
+
+    template = """
+    <div class="panel auth">
+
+        <h2>Login</h2>
+
+        <form method="POST">
+
+            <input type="hidden" name="_csrf" value="{{ csrf() }}">
+
+            <label>Email</label>
+            <input type="email" name="email" required>
+
+            <label>Password</label>
+            <input type="password" name="password" required>
+
+            <button class="btn">Login</button>
+
+        </form>
+
+        <p>New user? <a href="/register">Create Account</a></p>
+
+    </div>
+    """
+
+    return render_page("Login", template)
 
 
-@app.post("/logout")
+# =========================
+# LOGOUT
+# =========================
+
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
+
     verify_csrf()
     session.clear()
-    flash("You have been logged out.")
+
+    flash("Logged out successfully.")
+
     return redirect(url_for("home"))
 
 
-@app.post("/cart/add/<int:product_id>")
+# =========================
+# ADD TO CART
+# =========================
+
+@app.route("/cart/add/<int:food_id>", methods=["POST"])
 @login_required
-def add_to_cart(product_id):
+def add_to_cart(food_id):
+
     verify_csrf()
-    quantity = max(1, min(int(request.form.get("quantity", 1)), 20))
-    user_id = session["user_id"]
-    with db() as con:
-        product = con.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
-        if not product or product["stock"] < quantity:
-            flash("Product unavailable or insufficient stock.", "warning")
-        else:
-            existing = con.execute("SELECT quantity FROM cart_items WHERE user_id=? AND product_id=?", (user_id, product_id)).fetchone()
-            new_qty = quantity + (existing["quantity"] if existing else 0)
-            if new_qty > product["stock"]:
-                flash("Your cart quantity exceeds available stock.", "warning")
-            elif existing:
-                con.execute("UPDATE cart_items SET quantity=? WHERE user_id=? AND product_id=?", (new_qty, user_id, product_id))
-                flash("Cart updated.")
-            else:
-                con.execute("INSERT INTO cart_items(user_id,product_id,quantity) VALUES(?,?,?)", (user_id, product_id, quantity))
-                flash("Added to cart.")
-    return redirect(request.referrer or url_for("home"))
 
-
-@app.route("/cart")
-@login_required
-def cart():
-    with db() as con:
-        items = con.execute("""SELECT p.id,p.name,p.price,p.stock,p.image_url,c.quantity,
-            (p.price*c.quantity) AS subtotal FROM cart_items c JOIN products p ON p.id=c.product_id
-            WHERE c.user_id=? ORDER BY c.id DESC""", (session["user_id"],)).fetchall()
-    total = sum(i["subtotal"] for i in items)
-    body = """<h1>Your shopping cart</h1>{% if items %}<div class="panel"><table><tr><th>Product</th><th>Price</th><th>Quantity</th><th>Subtotal</th><th></th></tr>
-    {% for i in items %}<tr><td>{{ i['name'] }}</td><td>₹{{ '%.2f'|format(i['price']) }}</td><td>
-    <form method="post" action="{{ url_for('update_cart', product_id=i['id']) }}" class="row"><input type="hidden" name="_csrf" value="{{ csrf() }}"><input style="width:75px;margin:0" type="number" min="1" max="{{ i['stock'] }}" name="quantity" value="{{ i['quantity'] }}"><button class="btn secondary">Update</button></form>
-    </td><td>₹{{ '%.2f'|format(i['subtotal']) }}</td><td><form method="post" action="{{ url_for('remove_from_cart', product_id=i['id']) }}"><input type="hidden" name="_csrf" value="{{ csrf() }}"><button class="btn danger">Remove</button></form></td></tr>{% endfor %}</table>
-    <div class="row" style="justify-content:flex-end;margin-top:18px"><h2>Total: ₹{{ '%.2f'|format(total) }}</h2>
-    <form method="post" action="{{ url_for('checkout') }}"><input type="hidden" name="_csrf" value="{{ csrf() }}"><button class="btn">Place demo order</button></form></div>
-    <p class="muted">Demo checkout only. No real payment is collected.</p></div>{% else %}<div class="empty">Your cart is empty. <a href="{{ url_for('home') }}">Continue shopping</a></div>{% endif %}"""
-    return page("Cart", body, items=items, total=total)
-
-
-@app.post("/cart/update/<int:product_id>")
-@login_required
-def update_cart(product_id):
-    verify_csrf()
     try:
         quantity = int(request.form.get("quantity", 1))
     except ValueError:
         quantity = 1
-    with db() as con:
-        product = con.execute("SELECT stock FROM products WHERE id=?", (product_id,)).fetchone()
-        if not product or quantity < 1 or quantity > product["stock"]:
-            flash("Invalid quantity or insufficient stock.", "warning")
+
+    quantity = max(1, min(quantity, 20))
+
+    with get_db() as con:
+
+        food = con.execute(
+            "SELECT id FROM foods WHERE id=?",
+            (food_id,)
+        ).fetchone()
+
+        if not food:
+            flash("Food item not found.", "warning")
+
         else:
-            con.execute("UPDATE cart_items SET quantity=? WHERE user_id=? AND product_id=?", (quantity, session["user_id"], product_id))
-            flash("Cart updated.")
-    return redirect(url_for("cart"))
+
+            existing = con.execute("""
+                SELECT quantity FROM cart
+                WHERE user_id=? AND food_id=?
+            """, (session["user_id"], food_id)).fetchone()
+
+            if existing:
+
+                new_quantity = min(existing["quantity"] + quantity, 20)
+
+                con.execute("""
+                    UPDATE cart SET quantity=?
+                    WHERE user_id=? AND food_id=?
+                """, (
+                    new_quantity,
+                    session["user_id"],
+                    food_id
+                ))
+
+            else:
+
+                con.execute("""
+                    INSERT INTO cart(user_id, food_id, quantity)
+                    VALUES (?, ?, ?)
+                """, (
+                    session["user_id"],
+                    food_id,
+                    quantity
+                ))
+
+            flash("Food added to cart!")
+
+    return redirect(request.referrer or url_for("home"))
 
 
-@app.post("/cart/remove/<int:product_id>")
+# =========================
+# VIEW CART
+# =========================
+
+@app.route("/cart")
 @login_required
-def remove_from_cart(product_id):
+def cart():
+
+    with get_db() as con:
+
+        items = con.execute("""
+            SELECT
+                foods.id,
+                foods.name,
+                foods.price,
+                cart.quantity,
+                foods.price * cart.quantity AS subtotal
+
+            FROM cart
+
+            JOIN foods ON foods.id = cart.food_id
+
+            WHERE cart.user_id=?
+
+        """, (session["user_id"],)).fetchall()
+
+    subtotal = sum(item["subtotal"] for item in items)
+    delivery = 30 if items else 0
+    total = subtotal + delivery
+
+    template = """
+    <h1>Your Shopping Cart</h1>
+
+    {% if items %}
+
+    <div class="panel">
+
+        <table>
+
+            <tr>
+                <th>Food</th>
+                <th>Price</th>
+                <th>Quantity</th>
+                <th>Subtotal</th>
+                <th>Action</th>
+            </tr>
+
+            {% for item in items %}
+
+            <tr>
+
+                <td>{{ item['name'] }}</td>
+
+                <td>₹{{ item['price'] }}</td>
+
+                <td>
+
+                    <form method="POST"
+                        action="{{ url_for('update_cart', food_id=item['id']) }}">
+
+                        <input type="hidden" name="_csrf" value="{{ csrf() }}">
+
+                        <input
+                            type="number"
+                            name="quantity"
+                            value="{{ item['quantity'] }}"
+                            min="1"
+                            max="20"
+                            style="width:70px"
+                        >
+
+                        <button class="btn">Update</button>
+
+                    </form>
+
+                </td>
+
+                <td>₹{{ item['subtotal'] }}</td>
+
+                <td>
+
+                    <form method="POST"
+                        action="{{ url_for('remove_cart', food_id=item['id']) }}">
+
+                        <input type="hidden" name="_csrf" value="{{ csrf() }}">
+
+                        <button class="btn secondary">Remove</button>
+
+                    </form>
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+        <h3>Subtotal: ₹{{ subtotal }}</h3>
+        <h3>Delivery Fee: ₹{{ delivery }}</h3>
+        <h2>Total: ₹{{ total }}</h2>
+
+        <a href="/checkout" class="btn">Proceed To Checkout</a>
+
+    </div>
+
+    {% else %}
+
+        <div class="panel">
+            <h3>Your cart is empty.</h3>
+            <a href="/" class="btn">Order Food</a>
+        </div>
+
+    {% endif %}
+    """
+
+    return render_page(
+        "Cart",
+        template,
+        items=items,
+        subtotal=subtotal,
+        delivery=delivery,
+        total=total
+    )
+
+
+# =========================
+# UPDATE CART
+# =========================
+
+@app.route("/cart/update/<int:food_id>", methods=["POST"])
+@login_required
+def update_cart(food_id):
+
     verify_csrf()
-    with db() as con:
-        con.execute("DELETE FROM cart_items WHERE user_id=? AND product_id=?", (session["user_id"], product_id))
-    flash("Item removed.")
+
+    try:
+        quantity = int(request.form.get("quantity", 1))
+    except ValueError:
+        quantity = 0
+
+    if quantity < 1 or quantity > 20:
+
+        flash("Quantity must be between 1 and 20.", "warning")
+
+    else:
+
+        with get_db() as con:
+            con.execute("""
+                UPDATE cart SET quantity=?
+                WHERE user_id=? AND food_id=?
+            """, (
+                quantity,
+                session["user_id"],
+                food_id
+            ))
+
+        flash("Cart updated.")
+
     return redirect(url_for("cart"))
 
 
-@app.post("/checkout")
+# =========================
+# REMOVE CART ITEM
+# =========================
+
+@app.route("/cart/remove/<int:food_id>", methods=["POST"])
+@login_required
+def remove_cart(food_id):
+
+    verify_csrf()
+
+    with get_db() as con:
+        con.execute("""
+            DELETE FROM cart
+            WHERE user_id=? AND food_id=?
+        """, (
+            session["user_id"],
+            food_id
+        ))
+
+    flash("Item removed from cart.")
+
+    return redirect(url_for("cart"))
+
+
+# =========================
+# CHECKOUT
+# =========================
+
+@app.route("/checkout", methods=["GET", "POST"])
 @login_required
 def checkout():
-    verify_csrf()
-    user_id = session["user_id"]
-    with db() as con:
-        items = con.execute("""SELECT p.id,p.name,p.price,p.stock,c.quantity FROM cart_items c
-            JOIN products p ON p.id=c.product_id WHERE c.user_id=?""", (user_id,)).fetchall()
-        if not items:
-            flash("Your cart is empty.", "warning")
-            return redirect(url_for("cart"))
-        for item in items:
-            if item["quantity"] > item["stock"]:
-                flash(f"Not enough stock for {item['name']}. Please update your cart.", "warning")
-                return redirect(url_for("cart"))
-        total = sum(item["price"] * item["quantity"] for item in items)
-        cur = con.execute("INSERT INTO orders(user_id,total,status,created_at) VALUES(?,?,?,?)",
-                          (user_id, total, "Placed", datetime.now().isoformat(timespec="seconds")))
-        order_id = cur.lastrowid
-        for item in items:
-            con.execute("INSERT INTO order_items(order_id,product_id,product_name,price,quantity) VALUES(?,?,?,?,?)",
-                        (order_id, item["id"], item["name"], item["price"], item["quantity"]))
-            con.execute("UPDATE products SET stock=stock-? WHERE id=?", (item["quantity"], item["id"]))
-        con.execute("DELETE FROM cart_items WHERE user_id=?", (user_id,))
-    flash(f"Order #{order_id} placed successfully. This is a demo order; no payment was taken.")
-    return redirect(url_for("orders"))
 
+    with get_db() as con:
+
+        items = con.execute("""
+            SELECT
+                foods.id,
+                foods.name,
+                foods.price,
+                cart.quantity
+
+            FROM cart
+
+            JOIN foods ON foods.id=cart.food_id
+
+            WHERE cart.user_id=?
+
+        """, (session["user_id"],)).fetchall()
+
+    if not items:
+        flash("Your cart is empty.", "warning")
+        return redirect(url_for("cart"))
+
+    subtotal = sum(item["price"] * item["quantity"] for item in items)
+    delivery = 30
+    total = subtotal + delivery
+
+    if request.method == "POST":
+
+        verify_csrf()
+
+        name = request.form.get("name", "").strip()
+        phone = request.form.get("phone", "").strip()
+        address = request.form.get("address", "").strip()
+
+        if not name or not phone or not address or len(phone) < 10:
+
+            flash("Please enter valid delivery details.", "warning")
+
+        else:
+
+            with get_db() as con:
+
+                cursor = con.execute("""
+                    INSERT INTO orders(
+                        user_id,
+                        customer_name,
+                        phone,
+                        address,
+                        total,
+                        status,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    session["user_id"],
+                    name,
+                    phone,
+                    address,
+                    total,
+                    "Order Received",
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                order_id = cursor.lastrowid
+
+                for item in items:
+
+                    con.execute("""
+                        INSERT INTO order_items(
+                            order_id,
+                            food_name,
+                            price,
+                            quantity
+                        )
+                        VALUES (?, ?, ?, ?)
+                    """, (
+                        order_id,
+                        item["name"],
+                        item["price"],
+                        item["quantity"]
+                    ))
+
+                con.execute(
+                    "DELETE FROM cart WHERE user_id=?",
+                    (session["user_id"],)
+                )
+
+            flash("Your order has been placed successfully!")
+
+            return redirect(url_for("orders"))
+
+    template = """
+    <div class="panel">
+
+        <h1>Checkout</h1>
+
+        <h3>Order Summary</h3>
+
+        {% for item in items %}
+
+            <p>
+                {{ item['name'] }} × {{ item['quantity'] }}
+                — ₹{{ item['price'] * item['quantity'] }}
+            </p>
+
+        {% endfor %}
+
+        <hr>
+
+        <h3>Subtotal: ₹{{ subtotal }}</h3>
+        <h3>Delivery: ₹{{ delivery }}</h3>
+        <h2>Total: ₹{{ total }}</h2>
+
+        <hr>
+
+        <form method="POST">
+
+            <input type="hidden" name="_csrf" value="{{ csrf() }}">
+
+            <label>Customer Name</label>
+            <input name="name" required>
+
+            <label>Phone Number</label>
+            <input type="tel" name="phone" minlength="10" required>
+
+            <label>Delivery Address</label>
+            <textarea name="address" required></textarea>
+
+            <button class="btn">Place Order</button>
+
+        </form>
+
+        <p class="muted">
+            Demo checkout: no real payment is collected.
+        </p>
+
+    </div>
+    """
+
+    return render_page(
+        "Checkout",
+        template,
+        items=items,
+        subtotal=subtotal,
+        delivery=delivery,
+        total=total
+    )
+
+
+# =========================
+# ORDER HISTORY
+# =========================
 
 @app.route("/orders")
 @login_required
 def orders():
-    with db() as con:
-        rows = con.execute("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC", (session["user_id"],)).fetchall()
-        details = {}
-        for order in rows:
-            details[order["id"]] = con.execute("SELECT * FROM order_items WHERE order_id=?", (order["id"],)).fetchall()
-    body = """<h1>Your orders</h1>{% for o in rows %}<div class="panel"><div class="row" style="justify-content:space-between"><h3>Order #{{ o['id'] }}</h3><strong>{{ o['status'] }}</strong></div>
-    <p class="muted">{{ o['created_at'] }}</p><ul>{% for i in details[o['id']] %}<li>{{ i['product_name'] }} × {{ i['quantity'] }} — ₹{{ '%.2f'|format(i['price']*i['quantity']) }}</li>{% endfor %}</ul>
-    <h3>Total: ₹{{ '%.2f'|format(o['total']) }}</h3></div>{% else %}<div class="empty">You have not placed any orders yet.</div>{% endfor %}"""
-    return page("Orders", body, rows=rows, details=details)
+
+    with get_db() as con:
+
+        all_orders = con.execute("""
+            SELECT * FROM orders
+            WHERE user_id=?
+            ORDER BY id DESC
+        """, (session["user_id"],)).fetchall()
+
+        order_items = {}
+
+        for order in all_orders:
+
+            order_items[order["id"]] = con.execute("""
+                SELECT * FROM order_items
+                WHERE order_id=?
+            """, (order["id"],)).fetchall()
+
+    template = """
+    <h1>My Orders</h1>
+
+    {% for order in all_orders %}
+
+        <div class="panel">
+
+            <h2>Order #{{ order['id'] }}</h2>
+
+            <p class="muted">{{ order['created_at'] }}</p>
+
+            <strong>Status: {{ order['status'] }}</strong>
+
+            <h3>Ordered Items</h3>
+
+            <ul>
+                {% for item in order_items[order['id']] %}
+
+                    <li>
+                        {{ item['food_name'] }}
+                        × {{ item['quantity'] }}
+                        — ₹{{ item['price'] * item['quantity'] }}
+                    </li>
+
+                {% endfor %}
+            </ul>
+
+            <h2>Total: ₹{{ order['total'] }}</h2>
+
+            <p>Delivery Address: {{ order['address'] }}</p>
+
+        </div>
+
+    {% else %}
+
+        <div class="panel">
+            <h3>No orders placed yet.</h3>
+            <a href="/" class="btn">Explore Menu</a>
+        </div>
+
+    {% endfor %}
+    """
+
+    return render_page(
+        "My Orders",
+        template,
+        all_orders=all_orders,
+        order_items=order_items
+    )
 
 
-@app.route("/admin")
-@login_required
-@admin_required
-def admin():
-    with db() as con:
-        products = con.execute("SELECT * FROM products ORDER BY id DESC").fetchall()
-        order_count = con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-        user_count = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    body = """<h1>Admin dashboard</h1><div class="grid">
-    <div class="panel"><div class="muted">Registered users</div><h2>{{ user_count }}</h2></div>
-    <div class="panel"><div class="muted">Orders placed</div><h2>{{ order_count }}</h2></div></div>
-    <div class="panel"><h2>Add product</h2><form method="post" action="{{ url_for('add_product') }}">
-    <input type="hidden" name="_csrf" value="{{ csrf() }}"><label>Product name</label><input name="name" required>
-    <label>Description</label><textarea name="description" required></textarea><div class="row">
-    <div style="flex:1"><label>Price (₹)</label><input type="number" min="0.01" step="0.01" name="price" required></div>
-    <div style="flex:1"><label>Stock</label><input type="number" min="0" name="stock" required></div>
-    <div style="flex:1"><label>Category</label><input name="category" required></div></div>
-    <label>Image URL (optional)</label><input name="image_url"><button class="btn">Add product</button></form></div>
-    <div class="panel"><h2>Products</h2><table><tr><th>Name</th><th>Price</th><th>Stock</th><th>Category</th></tr>
-    {% for p in products %}<tr><td>{{ p['name'] }}</td><td>₹{{ '%.2f'|format(p['price']) }}</td><td>{{ p['stock'] }}</td><td>{{ p['category'] }}</td></tr>{% endfor %}</table></div>"""
-    return page("Admin", body, products=products, user_count=user_count, order_count=order_count)
+# =========================
+# JENKINS HEALTH CHECK
+# =========================
 
-
-@app.post("/admin/products/add")
-@login_required
-@admin_required
-def add_product():
-    verify_csrf()
-    name = request.form.get("name", "").strip()
-    description = request.form.get("description", "").strip()
-    category = request.form.get("category", "").strip()
-    image_url = request.form.get("image_url", "").strip()
-    try:
-        price = float(request.form.get("price", "0"))
-        stock = int(request.form.get("stock", "0"))
-    except ValueError:
-        flash("Price and stock must be valid numbers.", "warning")
-        return redirect(url_for("admin"))
-    if not name or not description or not category or price <= 0 or stock < 0:
-        flash("Please enter valid product details.", "warning")
-    else:
-        with db() as con:
-            con.execute("INSERT INTO products(name,description,price,stock,category,image_url) VALUES(?,?,?,?,?,?)",
-                        (name, description, price, stock, category, image_url))
-        flash("Product added.")
-    return redirect(url_for("admin"))
-
-
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
-    return {"status": "ok", "application": "ShopEase"}
+
+    try:
+
+        with get_db() as con:
+            con.execute("SELECT 1").fetchone()
+
+        return {
+            "status": "ok",
+            "application": "TastyBite Food Ordering System"
+        }, 200
+
+    except sqlite3.Error:
+
+        return {
+            "status": "error",
+            "application": "TastyBite Food Ordering System"
+        }, 500
 
 
-@app.cli.command("create-admin")
-def create_admin():
-    """Create or promote an admin: flask --app app create-admin"""
-    email = os.environ.get("ADMIN_EMAIL", "admin@shopease.local").lower()
-    password = os.environ.get("ADMIN_PASSWORD")
-    if not password:
-        raise SystemExit("Set ADMIN_PASSWORD before running this command.")
-    with db() as con:
-        existing = con.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-        if existing:
-            con.execute("UPDATE users SET is_admin=1,password_hash=? WHERE id=?",
-                        (generate_password_hash(password), existing["id"]))
-        else:
-            con.execute("INSERT INTO users(name,email,password_hash,is_admin,created_at) VALUES(?,?,?,?,?)",
-                        ("Shop Admin", email, generate_password_hash(password), 1, datetime.now().isoformat(timespec="seconds")))
-    print(f"Admin account ready: {email}")
-
-
-init_db()
+# =========================
+# RUN APPLICATION
+# =========================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False
+    )
